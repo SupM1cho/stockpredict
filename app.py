@@ -240,12 +240,14 @@ def calculate_macd(data, fast=12, slow=26, signal=9):
     macd_histogram = macd - macd_signal
     return macd, macd_signal, macd_histogram
 
-# Enhanced prediction function with multiple models
+# Enhanced prediction function with multiple models including SVM
 def train_prediction_model(data, model_type="Linear Regression", train_test_split=0.8, days=7):
-    """Train prediction model with multiple algorithm options"""
+    """Train prediction model with multiple algorithm options including SVM"""
     try:
         from sklearn.linear_model import LinearRegression
         from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+        from sklearn.svm import SVR
+        from sklearn.preprocessing import StandardScaler
         from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
         from sklearn.model_selection import train_test_split as sklearn_split
         import warnings
@@ -277,6 +279,12 @@ def train_prediction_model(data, model_type="Linear Regression", train_test_spli
         if model_type == "Linear Regression":
             # Simple features for linear regression
             feature_columns = ['Days', 'Price_MA_5', 'Volume']
+        elif model_type == "SVM RBF":
+            # Enhanced features for SVM (works well with normalized features)
+            feature_columns = [
+                'Days', 'Open', 'High', 'Low', 'Volume',
+                'Price_MA_5', 'Price_MA_10', 'Price_Change', 'RSI'
+            ]
         else:
             # Enhanced features for tree-based models
             feature_columns = [
@@ -296,6 +304,16 @@ def train_prediction_model(data, model_type="Linear Regression", train_test_spli
         X_train, X_test, y_train, y_test = sklearn_split(
             X, y, test_size=(1-train_test_split), random_state=42, shuffle=False
         )
+        
+        # Initialize scaler for SVM (SVM requires feature scaling)
+        scaler = None
+        if model_type == "SVM RBF":
+            scaler = StandardScaler()
+            X_train_scaled = scaler.fit_transform(X_train)
+            X_test_scaled = scaler.transform(X_test)
+        else:
+            X_train_scaled = X_train
+            X_test_scaled = X_test
         
         # Initialize model based on selection
         if model_type == "Linear Regression":
@@ -323,15 +341,24 @@ def train_prediction_model(data, model_type="Linear Regression", train_test_spli
                 random_state=42
             )
             model_params = "Trees: 100, Learning Rate: 0.1, Max Depth: 6"
+            
+        elif model_type == "SVM RBF":
+            model = SVR(
+                kernel='rbf',
+                C=100.0,
+                gamma='scale',
+                epsilon=0.1
+            )
+            model_params = "RBF Kernel, C: 100.0, Gamma: scale, Epsilon: 0.1"
         
         else:
             raise ValueError(f"Unsupported model type: {model_type}")
         
         # Train model
-        model.fit(X_train, y_train)
+        model.fit(X_train_scaled, y_train)
         
         # Make predictions on test set
-        y_pred_test = model.predict(X_test)
+        y_pred_test = model.predict(X_test_scaled)
         
         # Calculate metrics
         test_metrics = {
@@ -341,7 +368,7 @@ def train_prediction_model(data, model_type="Linear Regression", train_test_spli
         }
         
         # Also calculate training metrics for comparison
-        y_pred_train = model.predict(X_train)
+        y_pred_train = model.predict(X_train_scaled)
         train_metrics = {
             'mae': mean_absolute_error(y_train, y_pred_train),
             'rmse': np.sqrt(mean_squared_error(y_train, y_pred_train)),
@@ -349,7 +376,6 @@ def train_prediction_model(data, model_type="Linear Regression", train_test_spli
         }
         
         # Make future predictions
-        last_row = train_data.iloc[-1:][feature_columns].values
         predictions = []
         
         # For future predictions, we need to simulate the features
@@ -363,6 +389,19 @@ def train_prediction_model(data, model_type="Linear Regression", train_test_spli
                     last_day + i,  # Days
                     last_close,    # Price_MA_5 (approximation)
                     train_data['Volume'].iloc[-1]  # Volume (last known)
+                ]
+            elif model_type == "SVM RBF":
+                # Enhanced features for SVM
+                future_features = [
+                    last_day + i,  # Days
+                    last_close * 0.999,  # Open (slight gap)
+                    last_close * 1.005,  # High (small range)
+                    last_close * 0.995,  # Low (small range)
+                    train_data['Volume'].mean(),  # Volume (average)
+                    last_close,  # Price_MA_5
+                    last_close,  # Price_MA_10
+                    0.001,  # Price_Change (small positive)
+                    50.0    # RSI (neutral)
                 ]
             else:
                 # More complex feature engineering for tree models
@@ -382,7 +421,14 @@ def train_prediction_model(data, model_type="Linear Regression", train_test_spli
                 ]
             
             future_X = np.array([future_features])
-            pred = model.predict(future_X)[0]
+            
+            # Scale features if using SVM
+            if model_type == "SVM RBF" and scaler is not None:
+                future_X_scaled = scaler.transform(future_X)
+                pred = model.predict(future_X_scaled)[0]
+            else:
+                pred = model.predict(future_X)[0]
+                
             predictions.append(pred)
             
             # Update last_close for next iteration
@@ -406,7 +452,8 @@ def train_prediction_model(data, model_type="Linear Regression", train_test_spli
             'training_samples': len(X_train),
             'test_samples': len(X_test),
             'features_used': len(feature_columns),
-            'feature_names': feature_columns
+            'feature_names': feature_columns,
+            'scaler_used': scaler is not None
         }
         
         combined_metrics = {
@@ -419,7 +466,13 @@ def train_prediction_model(data, model_type="Linear Regression", train_test_spli
             'model_info': model_info
         }
         
-        return pred_df, combined_metrics, model
+        # Store scaler in model info for future use
+        model_with_scaler = {
+            'model': model,
+            'scaler': scaler
+        }
+        
+        return pred_df, combined_metrics, model_with_scaler
         
     except ImportError as e:
         st.error(f"Required library not installed: {str(e)}")
@@ -534,11 +587,11 @@ def sidebar_configuration():
     )
     interval = interval_options[selected_interval]
     
-    # Model Parameters (from settings)
+    # Model Parameters (updated to include SVM)
     st.sidebar.markdown("### 🤖 Model Parameters")
     model_type = st.sidebar.selectbox(
         "Model Type",
-        ["Linear Regression", "Random Forest", "Gradient Boosting"],
+        ["Linear Regression", "Random Forest", "Gradient Boosting", "SVM RBF"],
         index=0 if DEFAULT_SETTINGS.get('model_type') == "Linear Regression" else 0
     )
     
@@ -888,6 +941,8 @@ def main():
         This application supports multiple currencies and exchanges worldwide!
         Analyze stocks from different markets including US, Europe, Asia, and more.
         Data is fetched directly from Yahoo Finance with automatic currency detection.
+        <br><br>
+        <strong>New:</strong> SVM with RBF kernel support for enhanced prediction accuracy!
     </div>
     """, unsafe_allow_html=True)
     
@@ -951,6 +1006,16 @@ def main():
         if not st.session_state.data_loaded:
             st.warning("⚠️ Please load stock data first in the Data Analysis tab.")
         else:
+            # Display model information
+            if config['model_type'] == "SVM RBF":
+                st.info("""
+                **SVM with RBF Kernel** selected:
+                - Excellent for non-linear patterns in stock data
+                - Automatically scales features for optimal performance
+                - Uses Radial Basis Function kernel for complex relationships
+                - Good for capturing market volatility patterns
+                """)
+            
             col1, col2 = st.columns([1, 4])
             with col1:
                 if st.button("🚀 Train Model", type="primary"):
@@ -978,11 +1043,13 @@ def main():
                 # Display model information
                 col1, col2 = st.columns(2)
                 with col1:
+                    scaling_info = "Yes (StandardScaler)" if model_info.get('scaler_used', False) else "No"
                     st.info(f"""
                     **Model Details:**
                     - Type: {model_info.get('model_type', 'Unknown')}
                     - Parameters: {model_info.get('model_params', 'N/A')}
                     - Features Used: {model_info.get('features_used', 'N/A')}
+                    - Feature Scaling: {scaling_info}
                     """)
                 
                 with col2:
@@ -1031,10 +1098,23 @@ def main():
                 else:
                     st.info("ℹ️ Acceptable generalization gap between training and test performance")
                 
-                # Feature importance for tree-based models
+                # SVM-specific information
+                if config['model_type'] == "SVM RBF":
+                    st.markdown("#### 🔬 SVM-Specific Information")
+                    st.info("""
+                    **SVM RBF Model Characteristics:**
+                    - Uses Radial Basis Function kernel for non-linear mapping
+                    - Features automatically scaled using StandardScaler
+                    - Optimal for capturing complex market patterns
+                    - C=100.0 (regularization strength), gamma='scale' (kernel coefficient)
+                    - Epsilon=0.1 (tolerance for support vector regression)
+                    """)
+                
+                # Feature importance for tree-based models (not applicable for SVM)
                 if config['model_type'] in ["Random Forest", "Gradient Boosting"] and st.session_state.trained_model:
                     try:
-                        feature_importance = st.session_state.trained_model.feature_importances_
+                        model_obj = st.session_state.trained_model.get('model', st.session_state.trained_model)
+                        feature_importance = model_obj.feature_importances_
                         feature_names = model_info.get('feature_names', [])
                         
                         if len(feature_importance) == len(feature_names):
@@ -1245,13 +1325,14 @@ def main():
         "<div style='text-align: center; color: gray;'>"
         "Built with ❤️ using Streamlit and yfinance | "
         "Free stock data from Yahoo Finance | "
-        "Supports multiple currencies and global markets"
+        "Supports multiple currencies and global markets | "
+        "Enhanced with SVM RBF kernel support"
         "</div>", 
         unsafe_allow_html=True
     )
     
-    # Additional info about supported markets
-    with st.expander("🌍 Supported Markets & Currencies"):
+    # Additional info about supported markets and models
+    with st.expander("🌍 Supported Markets, Currencies & Models"):
         st.markdown("""
         **Supported Stock Exchanges & Currencies:**
         
@@ -1279,10 +1360,38 @@ def main():
         **🪙 Cryptocurrencies (USD)**
         - BTC-USD, ETH-USD, ADA-USD, etc.
         
+        ---
+        
+        **🤖 Machine Learning Models:**
+        
+        **Linear Regression**
+        - Fast and simple baseline model
+        - Works well for linear trends
+        - Minimal computational requirements
+        
+        **Random Forest**
+        - Ensemble of decision trees
+        - Good for capturing non-linear patterns
+        - Provides feature importance rankings
+        
+        **Gradient Boosting**
+        - Sequential ensemble learning
+        - Excellent for complex patterns
+        - High accuracy potential
+        
+        **SVM with RBF Kernel** ⭐ *NEW*
+        - Support Vector Machine with Radial Basis Function
+        - Excellent for non-linear stock price patterns
+        - Automatic feature scaling for optimal performance
+        - Captures complex market volatility relationships
+        - Uses regularization to prevent overfitting
+        
         **💡 Tips:**
         - Use correct suffix for each exchange (e.g., .JK for Indonesia, .NS for India)
         - Currency is automatically detected from Yahoo Finance data
         - All price formatting adapts to the stock's native currency
+        - SVM RBF often performs well for volatile stocks with complex patterns
+        - Try different models to find the best fit for your specific stock
         """)
 
 if __name__ == "__main__":
